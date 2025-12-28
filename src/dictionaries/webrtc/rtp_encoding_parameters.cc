@@ -74,11 +74,21 @@ TO_NAPI_IMPL(webrtc::RtpEncodingParameters, pair) {
   if (!parameters.rid.empty()) {
     NODE_WEBRTC_CONVERT_AND_SET_OR_RETURN(env, object, "rid", parameters.rid)
   }
+  // Serialize SSRC - required for setParameters() to work correctly
+  // Without this, getParameters() returns object without ssrc, and
+  // setParameters() fails with InvalidStateError because ssrc doesn't match
+  if (parameters.ssrc) {
+    NODE_WEBRTC_CONVERT_AND_SET_OR_RETURN(env, object, "ssrc", *parameters.ssrc)
+  }
   NODE_WEBRTC_CONVERT_AND_SET_OR_RETURN(env, object, "active",
                                         parameters.active)
   if (parameters.max_bitrate_bps) {
     NODE_WEBRTC_CONVERT_AND_SET_OR_RETURN(env, object, "maxBitrate",
                                           parameters.max_bitrate_bps)
+  }
+  if (parameters.max_framerate) {
+    NODE_WEBRTC_CONVERT_AND_SET_OR_RETURN(env, object, "maxFramerate",
+                                          *parameters.max_framerate)
   }
   if (parameters.scale_resolution_down_by) {
     NODE_WEBRTC_CONVERT_AND_SET_OR_RETURN(env, object, "scaleResolutionDownBy",

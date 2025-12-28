@@ -22,6 +22,9 @@ let
         stdenv = (llvm pkgs).stdenv;
         nativeBuildInputs =
           (with pkgs; [
+            git
+            curl
+            wget
             cmake
             ninja
             nodejs_20

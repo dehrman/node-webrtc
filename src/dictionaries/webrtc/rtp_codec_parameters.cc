@@ -38,6 +38,8 @@ TO_NAPI_IMPL(webrtc::RtpCodecParameters, pair) {
                                           *params.num_channels)
   }
   if (!params.parameters.empty()) {
+    // Format: "a=fmtp:PT key1=value1; key2=value2"
+    // This format is what browsers return and what the parsing code expects
     std::string fmtp("a=fmtp:" + std::to_string(params.payload_type));
     uint64_t i = 0;
     for (const auto &param : params.parameters) {
@@ -69,16 +71,48 @@ static webrtc::RtpCodecParameters NapiToRtpCodecParameters(
     result.num_channels = channels.UnsafeFromJust();
   }
   if (maybeSdpFmtpLine.IsJust()) {
-    auto sdpFmtpLine = maybeSdpFmtpLine.UnsafeFromJust() + ";";
-    size_t pos = 0;
-    std::string keyValue;
-    while ((pos = sdpFmtpLine.find(";")) != std::string::npos) {
-      keyValue = sdpFmtpLine.substr(0, pos);
-      sdpFmtpLine.erase(0, pos + 1);
-      auto indexOfEquals = keyValue.find('=');
-      auto key = keyValue.substr(0, indexOfEquals);
-      auto value = keyValue.substr(indexOfEquals + 1);
-      result.parameters[key] = value;
+    auto sdpFmtpLine = maybeSdpFmtpLine.UnsafeFromJust();
+    
+    // Handle "a=fmtp:PT " prefix if present
+    // Format is: "a=fmtp:96 key1=value1; key2=value2"
+    auto fmtpPrefix = std::string("a=fmtp:");
+    if (sdpFmtpLine.find(fmtpPrefix) == 0) {
+      // Find the space after "a=fmtp:PT"
+      auto spacePos = sdpFmtpLine.find(' ');
+      if (spacePos != std::string::npos) {
+        sdpFmtpLine = sdpFmtpLine.substr(spacePos + 1);
+      } else {
+        // No parameters after the prefix
+        sdpFmtpLine = "";
+      }
+    }
+    
+    if (!sdpFmtpLine.empty()) {
+      // Now parse "key1=value1; key2=value2" format
+      sdpFmtpLine += ";";  // Add trailing semicolon for easier parsing
+      size_t pos = 0;
+      std::string keyValue;
+      while ((pos = sdpFmtpLine.find(";")) != std::string::npos) {
+        keyValue = sdpFmtpLine.substr(0, pos);
+        sdpFmtpLine.erase(0, pos + 1);
+        
+        // Trim leading/trailing whitespace from keyValue
+        while (!keyValue.empty() && keyValue[0] == ' ') {
+          keyValue.erase(0, 1);
+        }
+        while (!keyValue.empty() && keyValue[keyValue.size() - 1] == ' ') {
+          keyValue.erase(keyValue.size() - 1);
+        }
+        
+        if (keyValue.empty()) continue;
+        
+        auto indexOfEquals = keyValue.find('=');
+        if (indexOfEquals != std::string::npos) {
+          auto key = keyValue.substr(0, indexOfEquals);
+          auto value = keyValue.substr(indexOfEquals + 1);
+          result.parameters[key] = value;
+        }
+      }
     }
   }
   return result;
