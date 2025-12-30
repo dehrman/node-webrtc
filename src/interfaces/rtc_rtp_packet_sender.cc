@@ -425,10 +425,11 @@ Napi::Value RTCRtpPacketSender::SendRtcp(const Napi::CallbackInfo &info) {
   auto ok = network_thread->Invoke<bool>(
       RTC_FROM_HERE, [transport, packet]() mutable {
         rtc::PacketOptions options = {};
-        // SRTP bypass + RTCP flag (for non-muxed cases). Safe even when rtcp-mux is used.
+        // IMPORTANT: SRTCP packets must also bypass DTLS (same flag as SRTP).
+        // Note: some M98 checkouts do not expose a separate PF_RTCP flag; the
+        // transport call itself already routes via the RTCP send path.
         return transport->SendRtcpPacket(&packet, options,
-                                         cricket::PF_SRTP_BYPASS |
-                                             cricket::PF_RTCP);
+                                         cricket::PF_SRTP_BYPASS);
       });
 
   if (!ok) {
