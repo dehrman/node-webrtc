@@ -358,7 +358,10 @@ Napi::Value RTCRtpPacketSender::SendRtp(const Napi::CallbackInfo &info) {
   auto ok = network_thread->Invoke<bool>(
       RTC_FROM_HERE, [transport, packet]() mutable {
         rtc::PacketOptions options = {};
-        return transport->SendRtpPacket(&packet, options, 0);
+        // IMPORTANT: These are SRTP packets. On libwebrtc, the underlying DTLS
+        // transport must be told to bypass DTLS and send on the SRTP path.
+        // Without PF_SRTP_BYPASS, the send will typically fail (or be misrouted).
+        return transport->SendRtpPacket(&packet, options, rtc::PF_SRTP_BYPASS);
       });
 
   if (!ok) {
@@ -420,7 +423,9 @@ Napi::Value RTCRtpPacketSender::SendRtcp(const Napi::CallbackInfo &info) {
   auto ok = network_thread->Invoke<bool>(
       RTC_FROM_HERE, [transport, packet]() mutable {
         rtc::PacketOptions options = {};
-        return transport->SendRtcpPacket(&packet, options, 0);
+        // SRTP bypass + RTCP flag (for non-muxed cases). Safe even when rtcp-mux is used.
+        return transport->SendRtcpPacket(&packet, options,
+                                         rtc::PF_SRTP_BYPASS | rtc::PF_RTCP);
       });
 
   if (!ok) {
