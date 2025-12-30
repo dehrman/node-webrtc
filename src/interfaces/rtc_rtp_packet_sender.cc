@@ -354,9 +354,9 @@ Napi::Value RTCRtpPacketSender::SendRtp(const Napi::CallbackInfo &info) {
     network_thread = _network_thread;
   }
 
+  // CopyOnWriteBuffer copy is cheap (ref-counted); keep `packet` intact for debug logging.
   auto ok = network_thread->Invoke<bool>(
-      RTC_FROM_HERE,
-      [transport, packet = std::move(packet)]() mutable {
+      RTC_FROM_HERE, [transport, packet]() mutable {
         rtc::PacketOptions options = {};
         return transport->SendRtpPacket(&packet, options, 0);
       });
@@ -416,9 +416,9 @@ Napi::Value RTCRtpPacketSender::SendRtcp(const Napi::CallbackInfo &info) {
     network_thread = _network_thread;
   }
 
+  // CopyOnWriteBuffer copy is cheap (ref-counted); keep `packet` intact for debug logging.
   auto ok = network_thread->Invoke<bool>(
-      RTC_FROM_HERE,
-      [transport, packet = std::move(packet)]() mutable {
+      RTC_FROM_HERE, [transport, packet]() mutable {
         rtc::PacketOptions options = {};
         return transport->SendRtcpPacket(&packet, options, 0);
       });
