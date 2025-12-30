@@ -82,6 +82,16 @@ bool TryParseRtpHeader(const rtc::CopyOnWriteBuffer &buf, RtpHeaderSummary &out)
 
 std::atomic<int> g_send_rtp_false_logs{0};
 std::atomic<int> g_send_rtcp_false_logs{0};
+std::atomic<int> g_send_rtp_bypass_needed_logs{0};
+std::atomic<int> g_send_rtcp_bypass_needed_logs{0};
+
+struct SendAttemptDebug {
+  bool ok = false;
+  bool ok_flags0 = false;
+  bool ok_srtp_bypass = false;
+  bool writable = false;
+  bool receiving = false;
+};
 
 }  // namespace
 
@@ -356,15 +366,39 @@ Napi::Value RTCRtpPacketSender::SendRtp(const Napi::CallbackInfo &info) {
   }
 
   // CopyOnWriteBuffer copy is cheap (ref-counted); keep `packet` intact for debug logging.
-  auto ok = network_thread->Invoke<bool>(
+  auto dbg = network_thread->Invoke<SendAttemptDebug>(
       RTC_FROM_HERE, [transport, packet]() mutable {
+        SendAttemptDebug out;
+
+        // Helps distinguish transport readiness issues from packet issues.
+        out.writable = transport->writable();
+        out.receiving = transport->receiving();
+
         rtc::PacketOptions options = {};
-        // IMPORTANT: These are SRTP packets. On libwebrtc, the underlying DTLS
-        // transport must be told to bypass DTLS and send on the SRTP path.
-        // Without PF_SRTP_BYPASS, the send will typically fail (or be misrouted).
-        return transport->SendRtpPacket(&packet, options,
-                                        cricket::PF_SRTP_BYPASS);
+
+        // First try: do NOT pass PF_SRTP_BYPASS at this layer. This is the
+        // expected path for injecting *plaintext RTP* and letting libwebrtc
+        // apply SRTP protection internally.
+        {
+          rtc::CopyOnWriteBuffer pkt = packet;
+          out.ok_flags0 = transport->SendRtpPacket(&pkt, options, 0);
+          if (out.ok_flags0) {
+            out.ok = true;
+            return out;
+          }
+        }
+
+        // Fallback: some internal paths may accept only already-protected SRTP
+        // when PF_SRTP_BYPASS is passed in.
+        {
+          rtc::CopyOnWriteBuffer pkt = packet;
+          out.ok_srtp_bypass =
+              transport->SendRtpPacket(&pkt, options, cricket::PF_SRTP_BYPASS);
+          out.ok = out.ok_srtp_bypass;
+          return out;
+        }
       });
+  const auto ok = dbg.ok;
 
   if (!ok) {
     // Log a small amount of high-signal debug data to help pinpoint why the
@@ -382,6 +416,10 @@ Napi::Value RTCRtpPacketSender::SendRtp(const Napi::CallbackInfo &info) {
       std::cerr << "[node-webrtc][RTCRtpPacketSender] sendRtp returned false"
                 << " mid=" << (mid.empty() ? "(unknown)" : mid)
                 << " transport=" << transport
+                << " writable=" << (dbg.writable ? 1 : 0)
+                << " receiving=" << (dbg.receiving ? 1 : 0)
+                << " try0=" << (dbg.ok_flags0 ? 1 : 0)
+                << " tryBypass=" << (dbg.ok_srtp_bypass ? 1 : 0)
                 << " bytes=" << packet.size()
                 << " head=" << HexPrefix(packet, 24);
       if (rtp) {
@@ -394,6 +432,20 @@ Napi::Value RTCRtpPacketSender::SendRtp(const Napi::CallbackInfo &info) {
         std::cerr << " rtp{parse=false}";
       }
       std::cerr << std::endl;
+    }
+  } else if (!dbg.ok_flags0 && dbg.ok_srtp_bypass) {
+    // High-signal clue: sending only works if we pass PF_SRTP_BYPASS.
+    const auto n = g_send_rtp_bypass_needed_logs.fetch_add(1);
+    if (n < 2) {
+      std::string mid;
+      {
+        std::lock_guard<std::mutex> lock(_mutex);
+        mid = _mid;
+      }
+      std::cerr << "[node-webrtc][RTCRtpPacketSender] sendRtp succeeded only with PF_SRTP_BYPASS"
+                << " mid=" << (mid.empty() ? "(unknown)" : mid)
+                << " transport=" << transport
+                << " bytes=" << packet.size() << std::endl;
     }
   }
 
@@ -422,15 +474,34 @@ Napi::Value RTCRtpPacketSender::SendRtcp(const Napi::CallbackInfo &info) {
   }
 
   // CopyOnWriteBuffer copy is cheap (ref-counted); keep `packet` intact for debug logging.
-  auto ok = network_thread->Invoke<bool>(
+  auto dbg = network_thread->Invoke<SendAttemptDebug>(
       RTC_FROM_HERE, [transport, packet]() mutable {
+        SendAttemptDebug out;
+        out.writable = transport->writable();
+        out.receiving = transport->receiving();
+
         rtc::PacketOptions options = {};
-        // IMPORTANT: SRTCP packets must also bypass DTLS (same flag as SRTP).
-        // Note: some M98 checkouts do not expose a separate PF_RTCP flag; the
-        // transport call itself already routes via the RTCP send path.
-        return transport->SendRtcpPacket(&packet, options,
-                                         cricket::PF_SRTP_BYPASS);
+
+        // First try: let libwebrtc apply SRTCP protection.
+        {
+          rtc::CopyOnWriteBuffer pkt = packet;
+          out.ok_flags0 = transport->SendRtcpPacket(&pkt, options, 0);
+          if (out.ok_flags0) {
+            out.ok = true;
+            return out;
+          }
+        }
+
+        // Fallback: bypass flag.
+        {
+          rtc::CopyOnWriteBuffer pkt = packet;
+          out.ok_srtp_bypass =
+              transport->SendRtcpPacket(&pkt, options, cricket::PF_SRTP_BYPASS);
+          out.ok = out.ok_srtp_bypass;
+          return out;
+        }
       });
+  const auto ok = dbg.ok;
 
   if (!ok) {
     const auto n = g_send_rtcp_false_logs.fetch_add(1);
@@ -443,8 +514,25 @@ Napi::Value RTCRtpPacketSender::SendRtcp(const Napi::CallbackInfo &info) {
       std::cerr << "[node-webrtc][RTCRtpPacketSender] sendRtcp returned false"
                 << " mid=" << (mid.empty() ? "(unknown)" : mid)
                 << " transport=" << transport
+                << " writable=" << (dbg.writable ? 1 : 0)
+                << " receiving=" << (dbg.receiving ? 1 : 0)
+                << " try0=" << (dbg.ok_flags0 ? 1 : 0)
+                << " tryBypass=" << (dbg.ok_srtp_bypass ? 1 : 0)
                 << " bytes=" << packet.size()
                 << " head=" << HexPrefix(packet, 24) << std::endl;
+    }
+  } else if (!dbg.ok_flags0 && dbg.ok_srtp_bypass) {
+    const auto n = g_send_rtcp_bypass_needed_logs.fetch_add(1);
+    if (n < 2) {
+      std::string mid;
+      {
+        std::lock_guard<std::mutex> lock(_mutex);
+        mid = _mid;
+      }
+      std::cerr << "[node-webrtc][RTCRtpPacketSender] sendRtcp succeeded only with PF_SRTP_BYPASS"
+                << " mid=" << (mid.empty() ? "(unknown)" : mid)
+                << " transport=" << transport
+                << " bytes=" << packet.size() << std::endl;
     }
   }
 
