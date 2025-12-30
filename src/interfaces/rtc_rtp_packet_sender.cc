@@ -85,42 +85,15 @@ std::atomic<int> g_send_rtcp_false_logs{0};
 std::atomic<int> g_send_rtp_bypass_needed_logs{0};
 std::atomic<int> g_send_rtcp_bypass_needed_logs{0};
 
-// WebRTC internal APIs vary a bit across branch-heads. Some checkouts expose
-// writable()/receiving() directly on RtpTransportInternal, others expose
-// IsWritable()/IsReceiving(), and some expose neither. Keep debug logging
-// best-effort without breaking builds.
-template <typename T>
-auto TransportWritableImpl(T *t, int) -> decltype(t->writable(), bool()) {
-  return t->writable();
-}
-template <typename T>
-auto TransportWritableImpl(T *t, long) -> decltype(t->IsWritable(), bool()) {
-  return t->IsWritable();
-}
-inline bool TransportWritableImpl(...) { return false; }
-template <typename T> bool TransportWritable(T *t) {
-  return TransportWritableImpl(t, 0);
-}
-
-template <typename T>
-auto TransportReceivingImpl(T *t, int) -> decltype(t->receiving(), bool()) {
-  return t->receiving();
-}
-template <typename T>
-auto TransportReceivingImpl(T *t, long) -> decltype(t->IsReceiving(), bool()) {
-  return t->IsReceiving();
-}
-inline bool TransportReceivingImpl(...) { return false; }
-template <typename T> bool TransportReceiving(T *t) {
-  return TransportReceivingImpl(t, 0);
-}
-
 struct SendAttemptDebug {
   bool ok = false;
   bool ok_flags0 = false;
   bool ok_srtp_bypass = false;
-  bool writable = false;
-  bool receiving = false;
+  bool ready_to_send = false;
+  bool srtp_active = false;
+  bool writable_rtp = false;
+  bool writable_rtcp = false;
+  bool rtcp_mux = false;
 };
 
 }  // namespace
@@ -401,8 +374,12 @@ Napi::Value RTCRtpPacketSender::SendRtp(const Napi::CallbackInfo &info) {
         SendAttemptDebug out;
 
         // Helps distinguish transport readiness issues from packet issues.
-        out.writable = TransportWritable(transport);
-        out.receiving = TransportReceiving(transport);
+        // In WebRTC M98, these are the authoritative readiness gates.
+        out.ready_to_send = transport->IsReadyToSend();
+        out.srtp_active = transport->IsSrtpActive();
+        out.writable_rtp = transport->IsWritable(/*rtcp=*/false);
+        out.writable_rtcp = transport->IsWritable(/*rtcp=*/true);
+        out.rtcp_mux = transport->rtcp_mux_enabled();
 
         rtc::PacketOptions options = {};
 
@@ -446,8 +423,11 @@ Napi::Value RTCRtpPacketSender::SendRtp(const Napi::CallbackInfo &info) {
       std::cerr << "[node-webrtc][RTCRtpPacketSender] sendRtp returned false"
                 << " mid=" << (mid.empty() ? "(unknown)" : mid)
                 << " transport=" << transport
-                << " writable=" << (dbg.writable ? 1 : 0)
-                << " receiving=" << (dbg.receiving ? 1 : 0)
+                << " ready=" << (dbg.ready_to_send ? 1 : 0)
+                << " srtp=" << (dbg.srtp_active ? 1 : 0)
+                << " wRtp=" << (dbg.writable_rtp ? 1 : 0)
+                << " wRtcp=" << (dbg.writable_rtcp ? 1 : 0)
+                << " mux=" << (dbg.rtcp_mux ? 1 : 0)
                 << " try0=" << (dbg.ok_flags0 ? 1 : 0)
                 << " tryBypass=" << (dbg.ok_srtp_bypass ? 1 : 0)
                 << " bytes=" << packet.size()
@@ -507,8 +487,11 @@ Napi::Value RTCRtpPacketSender::SendRtcp(const Napi::CallbackInfo &info) {
   auto dbg = network_thread->Invoke<SendAttemptDebug>(
       RTC_FROM_HERE, [transport, packet]() mutable {
         SendAttemptDebug out;
-        out.writable = TransportWritable(transport);
-        out.receiving = TransportReceiving(transport);
+        out.ready_to_send = transport->IsReadyToSend();
+        out.srtp_active = transport->IsSrtpActive();
+        out.writable_rtp = transport->IsWritable(/*rtcp=*/false);
+        out.writable_rtcp = transport->IsWritable(/*rtcp=*/true);
+        out.rtcp_mux = transport->rtcp_mux_enabled();
 
         rtc::PacketOptions options = {};
 
@@ -544,8 +527,11 @@ Napi::Value RTCRtpPacketSender::SendRtcp(const Napi::CallbackInfo &info) {
       std::cerr << "[node-webrtc][RTCRtpPacketSender] sendRtcp returned false"
                 << " mid=" << (mid.empty() ? "(unknown)" : mid)
                 << " transport=" << transport
-                << " writable=" << (dbg.writable ? 1 : 0)
-                << " receiving=" << (dbg.receiving ? 1 : 0)
+                << " ready=" << (dbg.ready_to_send ? 1 : 0)
+                << " srtp=" << (dbg.srtp_active ? 1 : 0)
+                << " wRtp=" << (dbg.writable_rtp ? 1 : 0)
+                << " wRtcp=" << (dbg.writable_rtcp ? 1 : 0)
+                << " mux=" << (dbg.rtcp_mux ? 1 : 0)
                 << " try0=" << (dbg.ok_flags0 ? 1 : 0)
                 << " tryBypass=" << (dbg.ok_srtp_bypass ? 1 : 0)
                 << " bytes=" << packet.size()
