@@ -343,7 +343,16 @@ ReadPacketArg(const Napi::CallbackInfo &info, rtc::CopyOnWriteBuffer &out) {
   }
 
   auto content = static_cast<const char *>(arraybuffer.Data());
-  out = rtc::CopyOnWriteBuffer(content + byte_offset, byte_length);
+  // IMPORTANT: libwebrtc's SRTP layer (pc/srtp_transport.cc) calls ProtectRtp /
+  // ProtectRtcp which appends an auth tag (and for RTCP also an SRTCP index).
+  // If the CopyOnWriteBuffer has no spare capacity beyond `size`, protection
+  // fails and SendRtpPacket/SendRtcpPacket return false even when ICE/DTLS/SRTP
+  // are fully connected.
+  //
+  // Allocate headroom so SRTP can grow the packet in-place.
+  constexpr size_t kSrtpHeadroomBytes = 256;
+  out = rtc::CopyOnWriteBuffer(content + byte_offset, byte_length,
+                              byte_length + kSrtpHeadroomBytes);
   return true;
 }
 
