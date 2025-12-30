@@ -8,6 +8,12 @@
 
 #include "src/interfaces/rtc_rtp_packet_sender.hh"
 
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -28,6 +34,55 @@
 #include "src/node/error_factory.hh"
 
 namespace node_webrtc {
+
+namespace {
+
+std::string HexPrefix(const rtc::CopyOnWriteBuffer &buf, size_t max_bytes) {
+  std::ostringstream oss;
+  const auto *p = reinterpret_cast<const uint8_t *>(buf.cdata());
+  const auto n = std::min(buf.size(), max_bytes);
+  for (size_t i = 0; i < n; i++) {
+    oss << std::hex << std::setw(2) << std::setfill('0')
+        << static_cast<int>(p[i]);
+  }
+  return oss.str();
+}
+
+struct RtpHeaderSummary {
+  int version = -1;
+  bool extension = false;
+  bool marker = false;
+  int payload_type = -1;
+  uint16_t seq = 0;
+  uint32_t ts = 0;
+  uint32_t ssrc = 0;
+};
+
+bool TryParseRtpHeader(const rtc::CopyOnWriteBuffer &buf, RtpHeaderSummary &out) {
+  if (buf.size() < 12) {
+    return false;
+  }
+  const auto *p = reinterpret_cast<const uint8_t *>(buf.cdata());
+  const uint8_t b0 = p[0];
+  const uint8_t b1 = p[1];
+  out.version = (b0 >> 6) & 0x03;
+  out.extension = (b0 & 0x10) != 0;
+  out.marker = (b1 & 0x80) != 0;
+  out.payload_type = b1 & 0x7f;
+  out.seq = static_cast<uint16_t>((p[2] << 8) | p[3]);
+  out.ts = (static_cast<uint32_t>(p[4]) << 24) |
+           (static_cast<uint32_t>(p[5]) << 16) |
+           (static_cast<uint32_t>(p[6]) << 8) | static_cast<uint32_t>(p[7]);
+  out.ssrc = (static_cast<uint32_t>(p[8]) << 24) |
+             (static_cast<uint32_t>(p[9]) << 16) |
+             (static_cast<uint32_t>(p[10]) << 8) | static_cast<uint32_t>(p[11]);
+  return out.version == 2;
+}
+
+std::atomic<int> g_send_rtp_false_logs{0};
+std::atomic<int> g_send_rtcp_false_logs{0};
+
+}  // namespace
 
 Napi::FunctionReference &RTCRtpPacketSender::constructor() {
   static Napi::FunctionReference constructor;
@@ -169,6 +224,11 @@ RTCRtpPacketSender::RTCRtpPacketSender(const Napi::CallbackInfo &info)
       return;
     }
 
+    {
+      std::lock_guard<std::mutex> lock(_mutex);
+      _mid = mid;
+    }
+
     _network_thread = pc->network_thread();
     _rtp_transport = pc->GetRtpTransport(mid);
 
@@ -297,9 +357,40 @@ Napi::Value RTCRtpPacketSender::SendRtp(const Napi::CallbackInfo &info) {
   auto ok = network_thread->Invoke<bool>(
       RTC_FROM_HERE,
       [transport, packet = std::move(packet)]() mutable {
-        rtc::PacketOptions options;
+        rtc::PacketOptions options = {};
         return transport->SendRtpPacket(&packet, options, 0);
       });
+
+  if (!ok) {
+    // Log a small amount of high-signal debug data to help pinpoint why the
+    // underlying transport refused to send. Limit spam: only first few.
+    const auto n = g_send_rtp_false_logs.fetch_add(1);
+    if (n < 8) {
+      RtpHeaderSummary h;
+      const bool rtp = TryParseRtpHeader(packet, h);
+      std::string mid;
+      {
+        std::lock_guard<std::mutex> lock(_mutex);
+        mid = _mid;
+      }
+
+      std::cerr << "[node-webrtc][RTCRtpPacketSender] sendRtp returned false"
+                << " mid=" << (mid.empty() ? "(unknown)" : mid)
+                << " transport=" << transport
+                << " bytes=" << packet.size()
+                << " head=" << HexPrefix(packet, 24);
+      if (rtp) {
+        std::cerr << " rtp{v=" << h.version << " pt=" << h.payload_type
+                  << " m=" << (h.marker ? 1 : 0)
+                  << " x=" << (h.extension ? 1 : 0)
+                  << " seq=" << h.seq << " ts=" << h.ts << " ssrc=" << h.ssrc
+                  << "}";
+      } else {
+        std::cerr << " rtp{parse=false}";
+      }
+      std::cerr << std::endl;
+    }
+  }
 
   return Napi::Boolean::New(info.Env(), ok);
 }
@@ -328,9 +419,25 @@ Napi::Value RTCRtpPacketSender::SendRtcp(const Napi::CallbackInfo &info) {
   auto ok = network_thread->Invoke<bool>(
       RTC_FROM_HERE,
       [transport, packet = std::move(packet)]() mutable {
-        rtc::PacketOptions options;
+        rtc::PacketOptions options = {};
         return transport->SendRtcpPacket(&packet, options, 0);
       });
+
+  if (!ok) {
+    const auto n = g_send_rtcp_false_logs.fetch_add(1);
+    if (n < 8) {
+      std::string mid;
+      {
+        std::lock_guard<std::mutex> lock(_mutex);
+        mid = _mid;
+      }
+      std::cerr << "[node-webrtc][RTCRtpPacketSender] sendRtcp returned false"
+                << " mid=" << (mid.empty() ? "(unknown)" : mid)
+                << " transport=" << transport
+                << " bytes=" << packet.size()
+                << " head=" << HexPrefix(packet, 24) << std::endl;
+    }
+  }
 
   return Napi::Boolean::New(info.Env(), ok);
 }

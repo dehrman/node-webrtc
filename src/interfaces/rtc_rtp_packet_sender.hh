@@ -86,6 +86,9 @@ class RTCRtpPacketSender : public AsyncObjectWrapWithLoop<RTCRtpPacketSender>,
   rtc::Thread *_network_thread = nullptr;
   webrtc::RtpTransportInternal *_rtp_transport = nullptr;
 
+  // Debug: resolved MID for this sender (best-effort; populated after negotiation)
+  std::string _mid;
+
   bool _stopped = false;
   std::mutex _mutex;
 };
