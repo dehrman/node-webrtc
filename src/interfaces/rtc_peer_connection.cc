@@ -7,6 +7,9 @@
  */
 #include "src/interfaces/rtc_peer_connection.hh"
 
+#include <mutex>
+#include <unordered_set>
+
 #include <iostream>
 #include <src/api/jsep.h>
 #include <webrtc/api/media_types.h>
@@ -57,6 +60,11 @@
 
 namespace node_webrtc {
 
+namespace {
+std::mutex g_peer_connections_mutex;
+std::unordered_set<RTCPeerConnection *> g_peer_connections;
+}  // namespace
+
 Napi::FunctionReference &RTCPeerConnection::constructor() {
   static Napi::FunctionReference constructor;
   return constructor;
@@ -106,9 +114,19 @@ RTCPeerConnection::RTCPeerConnection(const Napi::CallbackInfo &info)
   }
 
   _jinglePeerConnection = maybePeerConnection.MoveValue();
+
+  {
+    std::lock_guard<std::mutex> lock(g_peer_connections_mutex);
+    g_peer_connections.insert(this);
+  }
 }
 
 RTCPeerConnection::~RTCPeerConnection() {
+  {
+    std::lock_guard<std::mutex> lock(g_peer_connections_mutex);
+    g_peer_connections.erase(this);
+  }
+
   _jinglePeerConnection = nullptr;
   _channels.clear();
   if (_factory) {
@@ -117,6 +135,34 @@ RTCPeerConnection::~RTCPeerConnection() {
     }
     _factory = nullptr;
   }
+}
+
+rtc::scoped_refptr<webrtc::PeerConnectionInterface>
+RTCPeerConnection::FindPeerConnectionForSender(
+    const rtc::scoped_refptr<webrtc::RtpSenderInterface> &sender) {
+  std::vector<rtc::scoped_refptr<webrtc::PeerConnectionInterface>> pcs;
+  {
+    std::lock_guard<std::mutex> lock(g_peer_connections_mutex);
+    pcs.reserve(g_peer_connections.size());
+    for (auto *pc : g_peer_connections) {
+      if (pc && pc->_jinglePeerConnection) {
+        pcs.push_back(pc->_jinglePeerConnection);
+      }
+    }
+  }
+
+  for (const auto &pc : pcs) {
+    if (!pc) {
+      continue;
+    }
+    for (const auto &s : pc->GetSenders()) {
+      if (s.get() == sender.get()) {
+        return pc;
+      }
+    }
+  }
+
+  return nullptr;
 }
 
 void RTCPeerConnection::OnSignalingChange(

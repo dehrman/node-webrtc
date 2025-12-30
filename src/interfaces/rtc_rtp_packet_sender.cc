@@ -1,0 +1,382 @@
+/* Copyright (c) 2025 The node-webrtc project authors. All rights reserved.
+ *
+ * Use of this source code is governed by a BSD-style license that can be found
+ * in the LICENSE.md file in the root of the source tree. All contributing
+ * project authors may be found in the AUTHORS file in the root of the source
+ * tree.
+ */
+
+#include "src/interfaces/rtc_rtp_packet_sender.hh"
+
+#include <utility>
+#include <vector>
+
+#include <webrtc/api/peer_connection_interface.h>
+#include <webrtc/api/rtp_transceiver_interface.h>
+#include <webrtc/rtc_base/thread.h>
+
+// Internal WebRTC headers (available in the libwebrtc source checkout)
+#include "pc/peer_connection.h"
+#include "pc/peer_connection_proxy.h"
+#include "pc/rtp_transport_internal.h"
+#include "rtc_base/async_packet_socket.h"
+#include "rtc_base/copy_on_write_buffer.h"
+#include "rtc_base/location.h"
+#include "rtc_base/third_party/sigslot/sigslot.h"
+
+#include "src/converters.hh"
+#include "src/node/error_factory.hh"
+
+namespace node_webrtc {
+
+Napi::FunctionReference &RTCRtpPacketSender::constructor() {
+  static Napi::FunctionReference constructor;
+  return constructor;
+}
+
+// static
+RTCPeerConnection *
+RTCRtpPacketSender::UnwrapMaybePeerConnection(const Napi::Env &env,
+                                              const Napi::Value &value) {
+  if (!value.IsObject()) {
+    return nullptr;
+  }
+
+  Napi::Object obj = value.As<Napi::Object>();
+
+  // Allow passing the JS wrapper RTCPeerConnection (lib/peerconnection.js),
+  // which stores the native binding object under the non-enumerable `_pc`.
+  if (obj.Has("_pc")) {
+    auto inner = obj.Get("_pc");
+    if (inner.IsObject()) {
+      obj = inner.As<Napi::Object>();
+    }
+  }
+
+  auto isInstance = false;
+  napi_instanceof(env, obj, RTCPeerConnection::constructor().Value(),
+                  &isInstance);
+  if (env.IsExceptionPending()) {
+    env.GetAndClearPendingException();
+    return nullptr;
+  }
+  if (!isInstance) {
+    return nullptr;
+  }
+
+  return RTCPeerConnection::Unwrap(obj);
+}
+
+// static
+rtc::scoped_refptr<webrtc::PeerConnectionInterface>
+RTCRtpPacketSender::FindPeerConnectionForSender(
+    const rtc::scoped_refptr<webrtc::RtpSenderInterface> &sender) {
+  return RTCPeerConnection::FindPeerConnectionForSender(sender);
+}
+
+RTCRtpPacketSender::RTCRtpPacketSender(const Napi::CallbackInfo &info)
+    : AsyncObjectWrapWithLoop<RTCRtpPacketSender>("RTCRtpPacketSender", *this,
+                                                 info) {
+  auto env = info.Env();
+
+  if (!info.IsConstructCall()) {
+    Napi::TypeError::New(env,
+                         "Use the new operator to construct an "
+                         "RTCRtpPacketSender.")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+
+  if (info.Length() < 1) {
+    Napi::TypeError::New(env, "RTCRtpPacketSender requires an RTCRtpSender")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+
+  // First arg: RTCRtpSender (native binding object)
+  auto maybeSender = From<RTCRtpSender *>(info[0]);
+  if (maybeSender.IsInvalid()) {
+    Napi::TypeError::New(env, "First argument must be an RTCRtpSender")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+  auto senderWrap = maybeSender.UnsafeFromValid();
+  _sender = senderWrap->sender();
+
+  // Optional second arg: RTCPeerConnection (either JS wrapper or native)
+  if (info.Length() >= 2) {
+    auto pcWrap = UnwrapMaybePeerConnection(env, info[1]);
+    if (!pcWrap) {
+      Napi::TypeError::New(
+          env,
+          "Second argument must be an RTCPeerConnection (or wrapper with _pc)")
+          .ThrowAsJavaScriptException();
+      return;
+    }
+    _pc = pcWrap->jinglePeerConnection();
+  } else {
+    _pc = FindPeerConnectionForSender(_sender);
+  }
+
+  if (!_pc) {
+    Napi::Error::New(env,
+                     "Could not find owning RTCPeerConnection for RTCRtpSender")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+
+  // The PeerConnection returned by WebRTC is a proxy. We need access to its
+  // signaling thread and its internal (concrete) PeerConnection.
+  auto pcProxy = static_cast<webrtc::PeerConnectionProxy *>(_pc.get());
+  _signaling_thread = pcProxy->signaling_thread();
+
+  if (!_signaling_thread) {
+    Napi::Error::New(env, "PeerConnection signaling thread unavailable")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+
+  // Resolve the MID for this sender and fetch the RtpTransportInternal (SRTP)
+  // used for that MID.
+  _signaling_thread->Invoke<void>(RTC_FROM_HERE, [this]() {
+    if (_stopped) {
+      return;
+    }
+
+    auto pcProxy = static_cast<webrtc::PeerConnectionProxy *>(_pc.get());
+    auto *pcIface = pcProxy->internal(); // actually PeerConnection
+    auto *pc = static_cast<webrtc::PeerConnection *>(pcIface);
+
+    // Identify the transceiver MID corresponding to this sender.
+    std::string mid;
+    for (const auto &t : pcIface->GetTransceivers()) {
+      if (!t) {
+        continue;
+      }
+      auto s = t->sender();
+      if (s.get() == _sender.get()) {
+        auto maybeMid = t->mid();
+        if (maybeMid.has_value()) {
+          mid = *maybeMid;
+        }
+        break;
+      }
+    }
+
+    if (mid.empty()) {
+      // Mid isn't available until negotiation completes.
+      _rtp_transport = nullptr;
+      return;
+    }
+
+    _network_thread = pc->network_thread();
+    _rtp_transport = pc->GetRtpTransport(mid);
+
+    if (_rtp_transport) {
+      // Listen for inbound RTCP feedback (transport is network-thread-owned).
+      auto transport = _rtp_transport;
+      auto network_thread = _network_thread;
+      if (network_thread) {
+        network_thread->Invoke<void>(RTC_FROM_HERE, [this, transport]() {
+          transport->SignalRtcpPacketReceived.connect(
+              this, &RTCRtpPacketSender::OnRtcpPacketReceived);
+        });
+      }
+    }
+  });
+
+  if (!_rtp_transport) {
+    Napi::Error::New(
+        env,
+        "Failed to locate RtpTransport for sender (missing MID or transport)")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+}
+
+RTCRtpPacketSender::~RTCRtpPacketSender() { Disconnect(); }
+
+void RTCRtpPacketSender::Disconnect() {
+  webrtc::RtpTransportInternal *transport = nullptr;
+  rtc::Thread *network_thread = nullptr;
+
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_stopped) {
+      return;
+    }
+    _stopped = true;
+    transport = _rtp_transport;
+    network_thread = _network_thread;
+  }
+
+  if (transport && network_thread) {
+    network_thread->Invoke<void>(RTC_FROM_HERE, [this, transport]() {
+      transport->SignalRtcpPacketReceived.disconnect(this);
+    });
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    _rtp_transport = nullptr;
+    _network_thread = nullptr;
+    _signaling_thread = nullptr;
+    _pc = nullptr;
+    _sender = nullptr;
+  }
+}
+
+Napi::Value RTCRtpPacketSender::GetStopped(const Napi::CallbackInfo &info) {
+  std::lock_guard<std::mutex> lock(_mutex);
+  return Napi::Boolean::New(info.Env(), _stopped);
+}
+
+Napi::Value RTCRtpPacketSender::Stop(const Napi::CallbackInfo &info) {
+  Disconnect();
+  return info.Env().Undefined();
+}
+
+static bool
+ReadPacketArg(const Napi::CallbackInfo &info, rtc::CopyOnWriteBuffer &out) {
+  auto env = info.Env();
+  if (info.Length() < 1) {
+    Napi::TypeError::New(env, "Expected ArrayBuffer, TypedArray, or DataView")
+        .ThrowAsJavaScriptException();
+    return false;
+  }
+
+  Napi::ArrayBuffer arraybuffer;
+  size_t byte_offset = 0;
+  size_t byte_length = 0;
+
+  if (info[0].IsTypedArray()) {
+    auto typedArray = info[0].As<Napi::TypedArray>();
+    arraybuffer = typedArray.ArrayBuffer();
+    byte_offset = typedArray.ByteOffset();
+    byte_length = typedArray.ByteLength();
+  } else if (info[0].IsDataView()) {
+    auto dataView = info[0].As<Napi::DataView>();
+    arraybuffer = dataView.ArrayBuffer();
+    byte_offset = dataView.ByteOffset();
+    byte_length = dataView.ByteLength();
+  } else if (info[0].IsArrayBuffer()) {
+    arraybuffer = info[0].As<Napi::ArrayBuffer>();
+    byte_length = arraybuffer.ByteLength();
+  } else {
+    Napi::TypeError::New(env, "Expected ArrayBuffer, TypedArray, or DataView")
+        .ThrowAsJavaScriptException();
+    return false;
+  }
+
+  auto content = static_cast<const char *>(arraybuffer.Data());
+  out = rtc::CopyOnWriteBuffer(content + byte_offset, byte_length);
+  return true;
+}
+
+Napi::Value RTCRtpPacketSender::SendRtp(const Napi::CallbackInfo &info) {
+  rtc::CopyOnWriteBuffer packet;
+  if (!ReadPacketArg(info, packet)) {
+    return info.Env().Undefined();
+  }
+
+  webrtc::RtpTransportInternal *transport = nullptr;
+  rtc::Thread *network_thread = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_stopped || !_rtp_transport || !_network_thread) {
+      Napi::Error(info.Env(),
+                  ErrorFactory::CreateInvalidStateError(
+                      info.Env(), "RTCRtpPacketSender is stopped"))
+          .ThrowAsJavaScriptException();
+      return info.Env().Undefined();
+    }
+    transport = _rtp_transport;
+    network_thread = _network_thread;
+  }
+
+  auto ok = network_thread->Invoke<bool>(
+      RTC_FROM_HERE,
+      [transport, packet = std::move(packet)]() mutable {
+        rtc::PacketOptions options;
+        return transport->SendRtpPacket(&packet, options, 0);
+      });
+
+  return Napi::Boolean::New(info.Env(), ok);
+}
+
+Napi::Value RTCRtpPacketSender::SendRtcp(const Napi::CallbackInfo &info) {
+  rtc::CopyOnWriteBuffer packet;
+  if (!ReadPacketArg(info, packet)) {
+    return info.Env().Undefined();
+  }
+
+  webrtc::RtpTransportInternal *transport = nullptr;
+  rtc::Thread *network_thread = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_stopped || !_rtp_transport || !_network_thread) {
+      Napi::Error(info.Env(),
+                  ErrorFactory::CreateInvalidStateError(
+                      info.Env(), "RTCRtpPacketSender is stopped"))
+          .ThrowAsJavaScriptException();
+      return info.Env().Undefined();
+    }
+    transport = _rtp_transport;
+    network_thread = _network_thread;
+  }
+
+  auto ok = network_thread->Invoke<bool>(
+      RTC_FROM_HERE,
+      [transport, packet = std::move(packet)]() mutable {
+        rtc::PacketOptions options;
+        return transport->SendRtcpPacket(&packet, options, 0);
+      });
+
+  return Napi::Boolean::New(info.Env(), ok);
+}
+
+void RTCRtpPacketSender::OnRtcpPacketReceived(rtc::CopyOnWriteBuffer *packet,
+                                              int64_t) {
+  if (!packet) {
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_stopped) {
+      return;
+    }
+  }
+
+  rtc::CopyOnWriteBuffer copy(*packet);
+
+  Dispatch(CreateCallback<RTCRtpPacketSender>([this, copy = std::move(copy)]() {
+    auto env = Env();
+    Napi::HandleScope scope(env);
+
+    auto data = Napi::Buffer<uint8_t>::Copy(
+        env, reinterpret_cast<const uint8_t *>(copy.cdata()), copy.size());
+    auto event = Napi::Object::New(env);
+    event.Set("type", Napi::String::New(env, "rtcp"));
+    event.Set("packet", data);
+    MakeCallback("dispatchEvent", {event});
+  }));
+}
+
+void RTCRtpPacketSender::Init(Napi::Env env, Napi::Object exports) {
+  auto func = DefineClass(
+      env, "RTCRtpPacketSender",
+      {InstanceMethod("sendRtp", &RTCRtpPacketSender::SendRtp),
+       InstanceMethod("sendRtcp", &RTCRtpPacketSender::SendRtcp),
+       InstanceMethod("stop", &RTCRtpPacketSender::Stop),
+       InstanceAccessor("stopped", &RTCRtpPacketSender::GetStopped, nullptr)});
+
+  constructor() = Napi::Persistent(func);
+  constructor().SuppressDestruct();
+
+  exports.Set("RTCRtpPacketSender", func);
+}
+
+}  // namespace node_webrtc
+
+

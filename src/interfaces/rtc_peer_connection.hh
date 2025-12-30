@@ -31,6 +31,7 @@ class DataChannelInterface;
 class IceCandidateInterface;
 class MediaStreamInterface;
 class RtpReceiverInterface;
+class RtpSenderInterface;
 class RtpTransceiverInterface;
 
 } // namespace webrtc
@@ -85,6 +86,18 @@ public:
   static Napi::FunctionReference &constructor();
 
   void SaveLastSdp(const RTCSessionDescriptionInit &lastSdp);
+
+  // Internal helper for nonstandard APIs: locate the PeerConnection for a
+  // sender by scanning active PeerConnections.
+  static rtc::scoped_refptr<webrtc::PeerConnectionInterface>
+  FindPeerConnectionForSender(
+      const rtc::scoped_refptr<webrtc::RtpSenderInterface> &sender);
+
+  // Internal accessor for nonstandard APIs.
+  rtc::scoped_refptr<webrtc::PeerConnectionInterface> jinglePeerConnection()
+      const {
+    return _jinglePeerConnection;
+  }
 
 private:
   Napi::Value AddTrack(const Napi::CallbackInfo &);

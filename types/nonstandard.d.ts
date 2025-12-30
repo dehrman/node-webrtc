@@ -79,3 +79,18 @@ export const RTCVideoSource: {
   prototype: RTCVideoSource;
   new (init?: RTCVideoSourceInit): RTCVideoSource;
 }
+
+export interface RTCRtpPacketSender extends EventTarget {
+  stop(): void;
+  readonly stopped: boolean;
+  sendRtp(packet: ArrayBuffer | ArrayBufferView): boolean;
+  sendRtcp(packet: ArrayBuffer | ArrayBufferView): boolean;
+  onrtcp: EventHandler;
+}
+
+export const RTCRtpPacketSender: {
+  prototype: RTCRtpPacketSender;
+  // Optional second argument may be the JS RTCPeerConnection wrapper (with _pc)
+  // or the native binding RTCPeerConnection.
+  new (sender: RTCRtpSender, peerConnection?: any): RTCRtpPacketSender;
+}

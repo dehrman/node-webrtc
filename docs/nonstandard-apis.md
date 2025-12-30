@@ -256,3 +256,34 @@ const rgbaFrame = { width, height, data: rgbaData };
 i420ToRgba(i420Frame, rgbaFrame);
 rgbaToI420(rgbaFrame, i420Frame);
 ```
+
+RTP/RTCP Packet Injection (Experimental)
+---------------------------------------
+
+node-webrtc includes a nonstandard API for injecting pre-packetized RTP/RTCP
+into libwebrtc's SRTP transport (ICE-selected path + DTLS-SRTP keys).
+
+This is useful when an external pipeline (e.g. FFmpeg) is producing
+RTP/H.264 already and you want to avoid pushing raw I420 frames into
+RTCVideoSource.
+
+```js
+const wrtc = require('wrtc');
+
+// ... create RTCPeerConnection, negotiate SDP, get an RTCRtpSender ...
+const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+
+// Create injector. Optionally pass pc as a second argument to avoid lookup.
+const injector = new wrtc.nonstandard.RTCRtpPacketSender(sender, pc);
+
+injector.onrtcp = ({ packet }) => {
+  // packet is a Node Buffer containing the inbound RTCP feedback bytes (SRTCP
+  // already decrypted by libwebrtc).
+};
+
+// Send a single RTP packet (Uint8Array / ArrayBufferView).
+injector.sendRtp(rtpPacketBytes);
+
+// Send a single RTCP packet (Uint8Array / ArrayBufferView).
+injector.sendRtcp(rtcpPacketBytes);
+```

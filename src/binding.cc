@@ -19,6 +19,7 @@
 #include "src/interfaces/rtc_peer_connection.hh"
 #include "src/interfaces/rtc_peer_connection/peer_connection_factory.hh"
 #include "src/interfaces/rtc_rtp_receiver.hh"
+#include "src/interfaces/rtc_rtp_packet_sender.hh"
 #include "src/interfaces/rtc_rtp_sender.hh"
 #include "src/interfaces/rtc_rtp_transceiver.hh"
 #include "src/interfaces/rtc_sctp_transport.hh"
@@ -50,6 +51,7 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
   node_webrtc::RTCDtlsTransport::Init(env, exports);
   node_webrtc::RTCPeerConnection::Init(env, exports);
   node_webrtc::RTCRtpReceiver::Init(env, exports);
+  node_webrtc::RTCRtpPacketSender::Init(env, exports);
   node_webrtc::RTCRtpSender::Init(env, exports);
   node_webrtc::RTCRtpTransceiver::Init(env, exports);
   node_webrtc::RTCSctpTransport::Init(env, exports);
