@@ -13,6 +13,7 @@
 
 #include <node-addon-api/napi.h>
 #include <webrtc/api/rtp_sender_interface.h>
+#include <webrtc/rtc_base/third_party/sigslot/sigslot.h>
 
 #include "src/interfaces/rtc_peer_connection.hh"
 #include "src/interfaces/rtc_rtp_sender.hh"
@@ -40,7 +41,8 @@ namespace node_webrtc {
  *   injector.sendRtcp(uint8ArrayOrArrayBuffer);
  *   injector.onrtcp = ({ packet }) => { ... }   // inbound RTCP feedback
  */
-class RTCRtpPacketSender : public AsyncObjectWrapWithLoop<RTCRtpPacketSender> {
+class RTCRtpPacketSender : public AsyncObjectWrapWithLoop<RTCRtpPacketSender>,
+                           public sigslot::has_slots<> {
  public:
   RTCRtpPacketSender(const Napi::CallbackInfo &);
   ~RTCRtpPacketSender() override;
