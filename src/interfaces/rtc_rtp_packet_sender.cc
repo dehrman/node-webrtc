@@ -22,6 +22,7 @@
 #include <webrtc/rtc_base/thread.h>
 
 // Internal WebRTC headers (available in the libwebrtc source checkout)
+#include "p2p/base/dtls_transport_internal.h"
 #include "pc/peer_connection.h"
 #include "pc/peer_connection_proxy.h"
 #include "pc/rtp_transport_internal.h"
@@ -361,7 +362,8 @@ Napi::Value RTCRtpPacketSender::SendRtp(const Napi::CallbackInfo &info) {
         // IMPORTANT: These are SRTP packets. On libwebrtc, the underlying DTLS
         // transport must be told to bypass DTLS and send on the SRTP path.
         // Without PF_SRTP_BYPASS, the send will typically fail (or be misrouted).
-        return transport->SendRtpPacket(&packet, options, rtc::PF_SRTP_BYPASS);
+        return transport->SendRtpPacket(&packet, options,
+                                        cricket::PF_SRTP_BYPASS);
       });
 
   if (!ok) {
@@ -425,7 +427,8 @@ Napi::Value RTCRtpPacketSender::SendRtcp(const Napi::CallbackInfo &info) {
         rtc::PacketOptions options = {};
         // SRTP bypass + RTCP flag (for non-muxed cases). Safe even when rtcp-mux is used.
         return transport->SendRtcpPacket(&packet, options,
-                                         rtc::PF_SRTP_BYPASS | rtc::PF_RTCP);
+                                         cricket::PF_SRTP_BYPASS |
+                                             cricket::PF_RTCP);
       });
 
   if (!ok) {
