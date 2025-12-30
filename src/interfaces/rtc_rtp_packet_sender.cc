@@ -85,6 +85,36 @@ std::atomic<int> g_send_rtcp_false_logs{0};
 std::atomic<int> g_send_rtp_bypass_needed_logs{0};
 std::atomic<int> g_send_rtcp_bypass_needed_logs{0};
 
+// WebRTC internal APIs vary a bit across branch-heads. Some checkouts expose
+// writable()/receiving() directly on RtpTransportInternal, others expose
+// IsWritable()/IsReceiving(), and some expose neither. Keep debug logging
+// best-effort without breaking builds.
+template <typename T>
+auto TransportWritableImpl(T *t, int) -> decltype(t->writable(), bool()) {
+  return t->writable();
+}
+template <typename T>
+auto TransportWritableImpl(T *t, long) -> decltype(t->IsWritable(), bool()) {
+  return t->IsWritable();
+}
+inline bool TransportWritableImpl(...) { return false; }
+template <typename T> bool TransportWritable(T *t) {
+  return TransportWritableImpl(t, 0);
+}
+
+template <typename T>
+auto TransportReceivingImpl(T *t, int) -> decltype(t->receiving(), bool()) {
+  return t->receiving();
+}
+template <typename T>
+auto TransportReceivingImpl(T *t, long) -> decltype(t->IsReceiving(), bool()) {
+  return t->IsReceiving();
+}
+inline bool TransportReceivingImpl(...) { return false; }
+template <typename T> bool TransportReceiving(T *t) {
+  return TransportReceivingImpl(t, 0);
+}
+
 struct SendAttemptDebug {
   bool ok = false;
   bool ok_flags0 = false;
@@ -371,8 +401,8 @@ Napi::Value RTCRtpPacketSender::SendRtp(const Napi::CallbackInfo &info) {
         SendAttemptDebug out;
 
         // Helps distinguish transport readiness issues from packet issues.
-        out.writable = transport->writable();
-        out.receiving = transport->receiving();
+        out.writable = TransportWritable(transport);
+        out.receiving = TransportReceiving(transport);
 
         rtc::PacketOptions options = {};
 
@@ -477,8 +507,8 @@ Napi::Value RTCRtpPacketSender::SendRtcp(const Napi::CallbackInfo &info) {
   auto dbg = network_thread->Invoke<SendAttemptDebug>(
       RTC_FROM_HERE, [transport, packet]() mutable {
         SendAttemptDebug out;
-        out.writable = transport->writable();
-        out.receiving = transport->receiving();
+        out.writable = TransportWritable(transport);
+        out.receiving = TransportReceiving(transport);
 
         rtc::PacketOptions options = {};
 
