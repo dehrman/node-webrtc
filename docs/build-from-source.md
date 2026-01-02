@@ -51,10 +51,67 @@ The supported cross-compilation directions are:
 - MacOS x64 ➡️ ️MacOS arm64
 - Linux x64 ➡️ Linux arm64
 
-To run e.g. that that cross-compilation:
+To cross-compile:
 
-1. Set `TARGET_ARCH` to "arm64"
+1. Set `TARGET_ARCH` to the target architecture (e.g., `"arm64"` or `"x64"`)
 2. Re-run `npm run build`
+
+#### macOS Cross-Compilation
+
+**Important:** On macOS, you must build **outside** the Nix shell when cross-compiling. The Nix-provided clang cannot cross-compile between x64 and arm64.
+
+```bash
+# Exit the Nix shell first if you're in one
+exit
+
+# Then build with the target architecture
+TARGET_ARCH="arm64" npm run build   # Build for Apple Silicon from Intel
+TARGET_ARCH="x64" npm run build     # Build for Intel from Apple Silicon
+```
+
+#### The `nix.gni` File
+
+The `nix.gni` file in the project root configures the toolchain used to build libwebrtc. The Nix shell hook automatically generates this file with Nix-specific paths when you enter the shell.
+
+For cross-compilation outside Nix (or if you encounter toolchain issues), manually configure `nix.gni`:
+
+```gni
+is_clang=true
+use_lld=false
+clang_use_chrome_plugins=false
+clang_base_path="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr"
+mac_sdk_path="/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+treat_warnings_as_errors=false
+```
+
+You can find your SDK path with:
+```bash
+xcrun --show-sdk-path
+```
+
+#### Troubleshooting Cross-Compilation
+
+**"NEON intrinsics not available" or similar ARM errors:**
+This happens when the Nix clang (which is x64-only) is being used for an arm64 build. Solution: exit the Nix shell and rebuild.
+
+**"builtin __has_trivial_* is deprecated" errors:**
+Newer versions of Apple Clang (16+) treat deprecated builtin warnings as errors. Add `treat_warnings_as_errors=false` to `nix.gni`.
+
+**CMake generator mismatch error:**
+If you see "Does not match the generator used previously", delete the build directory and rebuild:
+```bash
+rm -rf build-darwin-arm64
+TARGET_ARCH="arm64" npm run build
+```
+
+**Stale libwebrtc configuration:**
+If libwebrtc was configured with wrong toolchain paths, clean just the libwebrtc build:
+```bash
+rm -rf build-darwin-arm64/external/libwebrtc/build
+rm -f build-darwin-arm64/external/libwebrtc/stamp/project_libwebrtc-configure
+rm -f build-darwin-arm64/external/libwebrtc/stamp/project_libwebrtc-build
+npm run build
+```
 
 ### Debug Builds
 

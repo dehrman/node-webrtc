@@ -69,6 +69,48 @@ still be able to [build from source](docs/build-from-source.md).
   </tbody>
 </table>
 
+## Build from Source
+
+For most users, `npm install` will download a prebuilt binary. To build from source:
+
+```bash
+git clone https://github.com/node-webrtc/node-webrtc.git
+cd node-webrtc
+npm install
+
+# Option 1: Use Nix (recommended for native builds)
+nix develop
+npm run build
+
+# Option 2: Use system toolchain (required for cross-compilation on macOS)
+npm run build
+```
+
+### Cross-Compilation (macOS)
+
+To cross-compile for a different architecture on macOS, you must build **outside** the Nix shell using the system Xcode toolchain:
+
+```bash
+# Exit Nix shell if active, then:
+TARGET_ARCH="arm64" npm run build   # Build for Apple Silicon
+TARGET_ARCH="x64" npm run build     # Build for Intel
+```
+
+The build system uses `nix.gni` to configure the libwebrtc toolchain. For cross-compilation with system Xcode, ensure it contains:
+
+```gni
+is_clang=true
+use_lld=false
+clang_use_chrome_plugins=false
+clang_base_path="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr"
+mac_sdk_path="/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+treat_warnings_as_errors=false
+```
+
+> **Note:** The Nix shell regenerates `nix.gni` on entry with Nix-specific paths. These paths cannot cross-compile, so always build outside the Nix shell when targeting a different architecture.
+
+See [docs/build-from-source.md](docs/build-from-source.md) for full details.
+
 ## Examples
 
 See [node-webrtc/node-webrtc-examples](https://github.com/node-webrtc/node-webrtc-examples).
