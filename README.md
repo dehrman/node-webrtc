@@ -86,6 +86,12 @@ npm run build
 npm run build
 ```
 
+### Windows (x64) Build Notes
+
+Windows builds are a bit trickier than macOS/Linux. See
+[docs/build-from-source-windows.md](docs/build-from-source-windows.md) for the
+full checklist and Windows-specific troubleshooting.
+
 ### Cross-Compilation (macOS)
 
 To cross-compile for a different architecture on macOS, you must build **outside** the Nix shell using the system Xcode toolchain:

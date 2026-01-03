@@ -160,11 +160,15 @@ list(APPEND GN_GEN_ARGS
   rtc_enable_protobuf=false
   rtc_include_pulse_audio=false
   rtc_include_tests=false
+  # On Windows, building WebRTC with `use_lld=true` makes `lld-link.exe /lib`
+  # generate thin archives (`!<thin>`). Those cannot be consumed by MSVC's
+  # `link.exe` when linking `wrtc.node` (LNK1107). Keep this false so WebRTC
+  # produces standard .lib archives.
   use_lld=false
   rtc_use_h264=true
   proprietary_codecs=true
-  "ffmpeg_branding=\"Chrome\""
-  "target_cpu=\"$ENV{TARGET_ARCH}\""
+  "ffmpeg_branding=\\\"Chrome\\\""
+  "target_cpu=\\\"$ENV{TARGET_ARCH}\\\""
   "${NIX_GN_GEN_ARGS}"
 )
 
@@ -358,6 +362,8 @@ if(WIN32)
   )
 
   target_link_libraries(${MODULE} PRIVATE
+    # Required for /DELAYLOAD (cmake-js uses a delay-load hook for NODE.EXE).
+    delayimp.lib
     dmoguids.lib
     msdmo.lib
     secur32.lib

@@ -13,6 +13,10 @@ ECHO cd SOURCE_DIR
 cd %SOURCE_DIR%
 IF %ERRORLEVEL% NEQ 0 GOTO ERROR
 
+ECHO patching BUILD.gn to avoid GN unused-assignment error when use_lld=false
+CALL python3 "%~dp0patch-webrtc-windows.py"
+IF %ERRORLEVEL% NEQ 0 GOTO ERROR
+
 ECHO gn gen BINARY_DIR "--args=GN_GEN_ARGS"
 CALL gn gen %BINARY_DIR% "--args=%GN_GEN_ARGS%"
 IF %ERRORLEVEL% NEQ 0 GOTO ERROR
