@@ -1,0 +1,14 @@
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR arm64)
+
+# NOTE:
+# This repo uses the Ninja generator on Windows (via cmake-js).
+# For a win32-arm64 build on a win32-x64 host, you must run the build from a
+# Visual Studio Developer Prompt configured for an ARM64 target (x64->arm64),
+# e.g.:
+#   vcvarsall.bat amd64_arm64
+#
+# We intentionally do not hardcode paths to cl.exe/link.exe here; CMake will
+# pick them up from the environment (PATH/INCLUDE/LIB) configured by vcvarsall.
+
+

@@ -50,11 +50,34 @@ The supported cross-compilation directions are:
 - MacOS arm64 ➡️ MacOS x64
 - MacOS x64 ➡️ ️MacOS arm64
 - Linux x64 ➡️ Linux arm64
+- Windows x64 ➡️ Windows arm64 (**experimental**)
 
 To cross-compile:
 
 1. Set `TARGET_ARCH` to the target architecture (e.g., `"arm64"` or `"x64"`)
 2. Re-run `npm run build`
+
+#### Windows Cross-Compilation (x64 ➜ arm64)
+
+This is **experimental** and requires the ARM64 MSVC toolchain to be installed.
+
+High-level steps:
+
+1. Install the Visual Studio C++ **ARM64** build tools (x64 host, arm64 target).
+2. Open a VS Developer Prompt configured for ARM64 target (VS 2019 Build Tools example):
+
+```
+"%ProgramFiles(x86)%\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" amd64_arm64
+```
+
+3. Build with:
+
+```
+set TARGET_ARCH=arm64
+npm run build
+```
+
+This should produce `build-win32-arm64/wrtc.node`.
 
 #### macOS Cross-Compilation
 
